@@ -1,13 +1,9 @@
 #ifndef YFS_FS_H
 #define YFS_FS_H
 
-#include <cstdint>
+#include <stdint.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 #define YFS_MAGIC           0x59465331  /* "YFS1" */
 #define YFS_DEFAULT_BSIZE   4096        /* 4KB block size */
@@ -22,7 +18,7 @@ extern "C" {
 #define YFS_IFLNK           0120000
 
 /* On-disk Superblock */
-struct yfs_superblock {
+typedef struct yfs_superblock {
     uint32_t s_magic;           /* Magic number YFS_MAGIC */
     uint32_t s_bsize;           /* Block size in bytes (4096) */
     uint64_t s_blocks_count;    /* Total blocks in filesystem */
@@ -41,10 +37,10 @@ struct yfs_superblock {
     uint64_t s_last_checkpoint_tx;
     uint32_t s_clean_unmount;   /* 1 if unmounted cleanly, 0 otherwise */
     uint32_t s_pad[30];         /* Padding to fit 256 bytes / align */
-} __attribute__((packed));
+} __attribute__((packed)) yfs_superblock_t;
 
 /* On-disk Cylinder Group Descriptor */
-struct yfs_cgroup {
+typedef struct yfs_cgroup {
     uint32_t cg_cgx;            /* Cylinder group index */
     uint32_t cg_free_blocks;    /* Free blocks count in this CG */
     uint32_t cg_free_inodes;    /* Free inodes count in this CG */
@@ -54,10 +50,10 @@ struct yfs_cgroup {
     uint64_t cg_data_start;     /* Start block number of data blocks in this CG */
     uint32_t cg_data_blocks;    /* Count of data blocks in this CG */
     uint32_t cg_pad[6];
-} __attribute__((packed));
+} __attribute__((packed)) yfs_cgroup_t;
 
 /* On-disk Inode (128 bytes) */
-struct yfs_dinode {
+typedef struct yfs_dinode {
     uint16_t di_mode;           /* File mode and type */
     uint16_t di_nlink;          /* Number of hard links */
     uint32_t di_uid;            /* Owner UID */
@@ -71,16 +67,16 @@ struct yfs_dinode {
     uint32_t di_double_indirect;/* Double indirect block pointer */
     uint32_t di_flags;          /* File flags */
     uint32_t di_pad[10];        /* Pad to 128 bytes */
-} __attribute__((packed));
+} __attribute__((packed)) yfs_dinode_t;
 
 /* Directory Entry Record */
-struct yfs_dirent {
+typedef struct yfs_dirent {
     uint32_t d_ino;             /* Inode number */
     uint16_t d_reclen;          /* Record length (aligned to 4 bytes) */
     uint8_t  d_type;            /* File type (DT_DIR, DT_REG, etc.) */
     uint8_t  d_namlen;          /* Name length */
     char     d_name[YFS_MAX_NAME_LEN + 1]; /* Null-terminated name */
-} __attribute__((packed));
+} __attribute__((packed)) yfs_dirent_t;
 
 /* Journal Header and Record Types */
 #define YFS_JOURNAL_MAGIC       0x4A4F5552  /* "JOUR" */
@@ -89,7 +85,7 @@ struct yfs_dirent {
 #define YFS_LOG_TX_COMMIT       3
 #define YFS_LOG_CHECKPOINT      4
 
-struct yfs_journal_sb {
+typedef struct yfs_journal_sb {
     uint32_t j_magic;           /* YFS_JOURNAL_MAGIC */
     uint32_t j_bsize;           /* Journal block size */
     uint64_t j_start_blk;       /* Head block index in circular log */
@@ -98,20 +94,16 @@ struct yfs_journal_sb {
     uint64_t j_last_txid;       /* Latest committed transaction ID */
     uint64_t j_total_blocks;    /* Total blocks in circular journal */
     uint32_t j_pad[10];
-} __attribute__((packed));
+} __attribute__((packed)) yfs_journal_sb_t;
 
 /* Record descriptor stored in journal block */
-struct yfs_log_header {
+typedef struct yfs_log_header {
     uint32_t h_magic;           /* Magic marker */
     uint32_t h_type;            /* YFS_LOG_TX_BEGIN, YFS_LOG_BLOCK_REDO, YFS_LOG_TX_COMMIT */
     uint64_t h_txid;            /* Transaction sequence number */
     uint64_t h_target_blk;      /* Target home block number for redo record */
     uint32_t h_data_len;        /* Length of payload (typically block size or chunk) */
     uint32_t h_checksum;        /* CRC32 / Adler checksum */
-} __attribute__((packed));
-
-#ifdef __cplusplus
-}
-#endif
+} __attribute__((packed)) yfs_log_header_t;
 
 #endif /* YFS_FS_H */

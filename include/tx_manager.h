@@ -3,48 +3,38 @@
 
 #include "journal.h"
 #include "buffer_cache.h"
-#include <vector>
-#include <mutex>
-#include <memory>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <pthread.h>
 
-class Transaction {
-public:
-    Transaction(uint64_t txid, Journal *journal, BufferCache *cache);
-    ~Transaction();
+#define MAX_TX_MODIFIED_BLOCKS 256
 
-    uint64_t txid() const { return txid_; }
+typedef struct transaction {
+    uint64_t txid;
+    journal_t *journal;
+    buffer_cache_t *cache;
+    block_buffer_t *modified_blocks[MAX_TX_MODIFIED_BLOCKS];
+    size_t num_modified;
+    bool committed;
+    bool active;
+} transaction_t;
 
-    /* Modify a block within this transaction */
-    void modify_block(std::shared_ptr<BlockBuffer> buf);
+typedef struct tx_manager {
+    journal_t *journal;
+    buffer_cache_t *cache;
+    pthread_mutex_t lock;
+    uint64_t last_checkpoint_tx;
+} tx_manager_t;
 
-    /* Commit transaction to journal and buffer cache */
-    bool commit();
+tx_manager_t *tx_manager_create(journal_t *journal, buffer_cache_t *cache);
+void tx_manager_destroy(tx_manager_t *mgr);
 
-    /* Abort transaction */
-    void abort();
+transaction_t *tx_begin(tx_manager_t *mgr);
+void tx_modify_block(transaction_t *tx, block_buffer_t *buf);
+bool tx_commit(transaction_t *tx);
+void tx_abort(transaction_t *tx);
 
-private:
-    uint64_t txid_;
-    Journal *journal_;
-    BufferCache *cache_;
-    std::vector<std::shared_ptr<BlockBuffer>> modified_blocks_;
-    bool committed_;
-    bool active_;
-};
-
-class TxManager {
-public:
-    TxManager(Journal *journal, BufferCache *cache);
-    ~TxManager();
-
-    std::shared_ptr<Transaction> begin_transaction();
-    bool checkpoint();
-
-private:
-    Journal *journal_;
-    BufferCache *cache_;
-    std::mutex tx_lock_;
-    uint64_t last_checkpoint_tx_;
-};
+bool tx_manager_checkpoint(tx_manager_t *mgr);
 
 #endif /* TX_MANAGER_H */

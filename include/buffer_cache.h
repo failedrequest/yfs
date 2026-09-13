@@ -2,59 +2,55 @@
 #define BUFFER_CACHE_H
 
 #include "block_dev.h"
-#include <unordered_map>
-#include <list>
-#include <vector>
-#include <mutex>
-#include <memory>
-#include <cstring>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <pthread.h>
 
-struct BlockBuffer {
+typedef struct block_buffer {
     uint64_t blk_no;
     bool is_dirty;
     bool is_metadata;
     uint64_t last_txid;     /* Transaction ID that modified this block */
-    std::vector<uint8_t> data;
+    uint8_t *data;
+    struct block_buffer *prev;
+    struct block_buffer *next;
+    struct block_buffer *hash_next;
+} block_buffer_t;
 
-    BlockBuffer(uint64_t b, size_t size)
-        : blk_no(b), is_dirty(false), is_metadata(false), last_txid(0), data(size, 0) {}
-};
+typedef struct buffer_cache {
+    block_dev_t *dev;
+    size_t block_size;
+    size_t max_blocks;
+    size_t num_blocks;
+    pthread_mutex_t lock;
 
-class BufferCache {
-public:
-    BufferCache(BlockDev *dev, size_t block_size = 4096, size_t max_blocks = 1024);
-    ~BufferCache();
+    block_buffer_t *lru_head;
+    block_buffer_t *lru_tail;
 
-    /* Read a block from cache or disk */
-    std::shared_ptr<BlockBuffer> get_block(uint64_t blk_no, bool is_metadata = false);
+    #define BUF_HASH_SIZE 1024
+    block_buffer_t *hash_table[BUF_HASH_SIZE];
+} buffer_cache_t;
 
-    /* Mark block as dirty and associate with current transaction ID */
-    void mark_dirty(std::shared_ptr<BlockBuffer> buf, uint64_t txid = 0);
+buffer_cache_t *buffer_cache_create(block_dev_t *dev, size_t block_size, size_t max_blocks);
+void buffer_cache_destroy(buffer_cache_t *cache);
 
-    /* Flush a specific buffer to disk */
-    bool flush_block(std::shared_ptr<BlockBuffer> buf);
+/* Read or get a block from cache/disk */
+block_buffer_t *buffer_cache_get(buffer_cache_t *cache, uint64_t blk_no, bool is_metadata);
 
-    /* Flush all dirty blocks up to a given transaction ID (checkpoint) */
-    bool checkpoint_tx(uint64_t up_to_txid);
+/* Mark block as dirty and associate with current transaction ID */
+void buffer_cache_mark_dirty(buffer_cache_t *cache, block_buffer_t *buf, uint64_t txid);
 
-    /* Flush all dirty blocks in cache */
-    bool sync_all();
+/* Flush a specific buffer to disk */
+bool buffer_cache_flush_block(buffer_cache_t *cache, block_buffer_t *buf);
 
-    /* Invalidate cached blocks */
-    void invalidate();
+/* Flush all dirty blocks up to a given transaction ID (checkpoint) */
+bool buffer_cache_checkpoint_tx(buffer_cache_t *cache, uint64_t up_to_txid);
 
-    size_t block_size() const { return block_size_; }
+/* Flush all dirty blocks in cache */
+bool buffer_cache_sync_all(buffer_cache_t *cache);
 
-private:
-    BlockDev *dev_;
-    size_t block_size_;
-    size_t max_blocks_;
-    std::mutex cache_lock_;
-
-    std::unordered_map<uint64_t, std::shared_ptr<BlockBuffer>> cache_map_;
-    std::list<uint64_t> lru_list_;
-
-    void evict_lru_unlocked();
-};
+/* Invalidate cached blocks */
+void buffer_cache_invalidate(buffer_cache_t *cache);
 
 #endif /* BUFFER_CACHE_H */

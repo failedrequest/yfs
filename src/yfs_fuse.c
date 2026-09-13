@@ -1,33 +1,34 @@
 #define FUSE_USE_VERSION 31
 
 #include <fuse_lowlevel.h>
-#include "include/yfs_core.h"
-#include <iostream>
-#include <cstring>
-#include <cerrno>
+#include "yfs_core.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
 #include <unistd.h>
 
-static YFSFileSystem *g_fs = nullptr;
+static yfs_filesystem_t *g_fs = nullptr;
 
-static void dinode_to_stat(uint32_t ino, const yfs_dinode &dinode, struct stat &st) {
-    memset(&st, 0, sizeof(st));
-    st.st_ino = ino;
-    st.st_mode = dinode.di_mode;
-    st.st_nlink = dinode.di_nlink;
-    st.st_uid = dinode.di_uid;
-    st.st_gid = dinode.di_gid;
-    st.st_size = dinode.di_size;
-    st.st_atime = dinode.di_atime;
-    st.st_mtime = dinode.di_mtime;
-    st.st_ctime = dinode.di_ctime;
-    st.st_blksize = YFS_DEFAULT_BSIZE;
-    st.st_blocks = (dinode.di_size + 511) / 512;
+static void dinode_to_stat(uint32_t ino, const yfs_dinode_t *dinode, struct stat *st) {
+    memset(st, 0, sizeof(*st));
+    st->st_ino = ino;
+    st->st_mode = dinode->di_mode;
+    st->st_nlink = dinode->di_nlink;
+    st->st_uid = dinode->di_uid;
+    st->st_gid = dinode->di_gid;
+    st->st_size = (off_t)dinode->di_size;
+    st->st_atime = (time_t)dinode->di_atime;
+    st->st_mtime = (time_t)dinode->di_mtime;
+    st->st_ctime = (time_t)dinode->di_ctime;
+    st->st_blksize = YFS_DEFAULT_BSIZE;
+    st->st_blocks = (blkcnt_t)((dinode->di_size + 511) / 512);
 }
 
 static void yfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
     uint32_t out_ino = 0;
-    yfs_dinode dinode;
-    int ret = g_fs->lookup(parent, name, out_ino, dinode);
+    yfs_dinode_t dinode;
+    int ret = yfs_lookup(g_fs, (uint32_t)parent, name, &out_ino, &dinode);
     if (ret != 0) {
         fuse_reply_err(req, -ret);
         return;
@@ -38,27 +39,27 @@ static void yfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
     e.ino = out_ino;
     e.attr_timeout = 1.0;
     e.entry_timeout = 1.0;
-    dinode_to_stat(out_ino, dinode, e.attr);
+    dinode_to_stat(out_ino, &dinode, &e.attr);
     fuse_reply_entry(req, &e);
 }
 
 static void yfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
     (void)fi;
-    yfs_dinode dinode;
-    int ret = g_fs->getattr(ino, dinode);
+    yfs_dinode_t dinode;
+    int ret = yfs_getattr(g_fs, (uint32_t)ino, &dinode);
     if (ret != 0) {
         fuse_reply_err(req, -ret);
         return;
     }
 
     struct stat st;
-    dinode_to_stat(ino, dinode, st);
+    dinode_to_stat((uint32_t)ino, &dinode, &st);
     fuse_reply_attr(req, &st, 1.0);
 }
 
 static void yfs_ll_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, int to_set, struct fuse_file_info *fi) {
     (void)fi;
-    yfs_dinode dinode;
+    yfs_dinode_t dinode;
     memset(&dinode, 0, sizeof(dinode));
     int yfs_flags = 0;
 
@@ -75,35 +76,35 @@ static void yfs_ll_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, in
         yfs_flags |= 4;
     }
     if (to_set & FUSE_SET_ATTR_SIZE) {
-        g_fs->truncate(ino, attr->st_size);
+        yfs_truncate(g_fs, (uint32_t)ino, attr->st_size);
     }
     if (to_set & FUSE_SET_ATTR_ATIME) {
-        dinode.di_atime = attr->st_atime;
+        dinode.di_atime = (uint64_t)attr->st_atime;
         yfs_flags |= 16;
     }
     if (to_set & FUSE_SET_ATTR_MTIME) {
-        dinode.di_mtime = attr->st_mtime;
+        dinode.di_mtime = (uint64_t)attr->st_mtime;
         yfs_flags |= 32;
     }
 
-    int ret = g_fs->setattr(ino, dinode, yfs_flags);
+    int ret = yfs_setattr(g_fs, (uint32_t)ino, &dinode, yfs_flags);
     if (ret != 0) {
         fuse_reply_err(req, -ret);
         return;
     }
 
-    yfs_dinode out_dinode;
-    g_fs->getattr(ino, out_dinode);
+    yfs_dinode_t out_dinode;
+    yfs_getattr(g_fs, (uint32_t)ino, &out_dinode);
     struct stat st;
-    dinode_to_stat(ino, out_dinode, st);
+    dinode_to_stat((uint32_t)ino, &out_dinode, &st);
     fuse_reply_attr(req, &st, 1.0);
 }
 
 static void yfs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode, struct fuse_file_info *fi) {
     const struct fuse_ctx *ctx = fuse_req_ctx(req);
     uint32_t out_ino = 0;
-    yfs_dinode dinode;
-    int ret = g_fs->create(parent, name, mode, ctx->uid, ctx->gid, out_ino, dinode);
+    yfs_dinode_t dinode;
+    int ret = yfs_create(g_fs, (uint32_t)parent, name, mode, ctx->uid, ctx->gid, &out_ino, &dinode);
     if (ret != 0) {
         fuse_reply_err(req, -ret);
         return;
@@ -114,7 +115,7 @@ static void yfs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *name, m
     e.ino = out_ino;
     e.attr_timeout = 1.0;
     e.entry_timeout = 1.0;
-    dinode_to_stat(out_ino, dinode, e.attr);
+    dinode_to_stat(out_ino, &dinode, &e.attr);
 
     fuse_reply_create(req, &e, fi);
 }
@@ -122,8 +123,8 @@ static void yfs_ll_create(fuse_req_t req, fuse_ino_t parent, const char *name, m
 static void yfs_ll_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode) {
     const struct fuse_ctx *ctx = fuse_req_ctx(req);
     uint32_t out_ino = 0;
-    yfs_dinode dinode;
-    int ret = g_fs->mkdir(parent, name, mode, ctx->uid, ctx->gid, out_ino, dinode);
+    yfs_dinode_t dinode;
+    int ret = yfs_mkdir(g_fs, (uint32_t)parent, name, mode, ctx->uid, ctx->gid, &out_ino, &dinode);
     if (ret != 0) {
         fuse_reply_err(req, -ret);
         return;
@@ -134,37 +135,49 @@ static void yfs_ll_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name, mo
     e.ino = out_ino;
     e.attr_timeout = 1.0;
     e.entry_timeout = 1.0;
-    dinode_to_stat(out_ino, dinode, e.attr);
+    dinode_to_stat(out_ino, &dinode, &e.attr);
 
     fuse_reply_entry(req, &e);
 }
 
 static void yfs_ll_unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
-    int ret = g_fs->unlink(parent, name);
+    int ret = yfs_unlink(g_fs, (uint32_t)parent, name);
     fuse_reply_err(req, ret == 0 ? 0 : -ret);
 }
 
 static void yfs_ll_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
-    int ret = g_fs->rmdir(parent, name);
+    int ret = yfs_rmdir(g_fs, (uint32_t)parent, name);
     fuse_reply_err(req, ret == 0 ? 0 : -ret);
+}
+
+static void yfs_ll_open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
+    (void)ino;
+    fuse_reply_open(req, fi);
 }
 
 static void yfs_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct fuse_file_info *fi) {
     (void)fi;
-    std::vector<char> buf(size, 0);
+    char *buf = (char *)calloc(1, size);
+    if (!buf) {
+        fuse_reply_err(req, ENOMEM);
+        return;
+    }
+
     size_t bytes_read = 0;
-    int ret = g_fs->read(ino, buf.data(), size, off, bytes_read);
+    int ret = yfs_read(g_fs, (uint32_t)ino, buf, size, off, &bytes_read);
     if (ret != 0) {
+        free(buf);
         fuse_reply_err(req, -ret);
         return;
     }
-    fuse_reply_buf(req, buf.data(), bytes_read);
+    fuse_reply_buf(req, buf, bytes_read);
+    free(buf);
 }
 
 static void yfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf, size_t size, off_t off, struct fuse_file_info *fi) {
     (void)fi;
     size_t bytes_written = 0;
-    int ret = g_fs->write(ino, buf, size, off, bytes_written);
+    int ret = yfs_write(g_fs, (uint32_t)ino, buf, size, off, &bytes_written);
     if (ret != 0) {
         fuse_reply_err(req, -ret);
         return;
@@ -172,39 +185,89 @@ static void yfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf, size_t
     fuse_reply_write(req, bytes_written);
 }
 
+static void yfs_ll_flush(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
+    (void)ino;
+    (void)fi;
+    fuse_reply_err(req, 0);
+}
+
+static void yfs_ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
+    (void)ino;
+    (void)fi;
+    fuse_reply_err(req, 0);
+}
+
+static void yfs_ll_fsync(fuse_req_t req, fuse_ino_t ino, int datasync, struct fuse_file_info *fi) {
+    (void)ino;
+    (void)datasync;
+    (void)fi;
+    if (g_fs && g_fs->tx_mgr) {
+        tx_manager_checkpoint(g_fs->tx_mgr);
+    }
+    fuse_reply_err(req, 0);
+}
+
+static void yfs_ll_opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
+    (void)ino;
+    fuse_reply_open(req, fi);
+}
+
 static void yfs_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct fuse_file_info *fi) {
     (void)fi;
-    std::vector<DirEntry> entries;
-    int ret = g_fs->readdir(ino, entries);
+    yfs_dir_list_t list;
+    yfs_dir_list_init(&list);
+
+    int ret = yfs_readdir(g_fs, (uint32_t)ino, &list);
     if (ret != 0) {
+        yfs_dir_list_free(&list);
         fuse_reply_err(req, -ret);
         return;
     }
 
-    std::vector<char> buf(size, 0);
-    size_t offset = 0;
+    char *buf = (char *)calloc(1, size);
+    if (!buf) {
+        yfs_dir_list_free(&list);
+        fuse_reply_err(req, ENOMEM);
+        return;
+    }
 
-    for (size_t i = off; i < entries.size(); ++i) {
+    size_t offset = 0;
+    for (size_t i = (size_t)off; i < list.count; ++i) {
         struct stat st;
         memset(&st, 0, sizeof(st));
-        st.st_ino = entries[i].ino;
-        st.st_mode = (entries[i].type == 2) ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+        st.st_ino = list.entries[i].ino;
+        st.st_mode = (list.entries[i].type == 2) ? (S_IFDIR | 0755) : (S_IFREG | 0644);
 
-        size_t entry_size = fuse_add_direntry(req, buf.data() + offset, size - offset,
-                                              entries[i].name.c_str(), &st, i + 1);
+        size_t entry_size = fuse_add_direntry(req, buf + offset, size - offset,
+                                              list.entries[i].name, &st, (off_t)(i + 1));
         if (offset + entry_size > size) {
             break;
         }
         offset += entry_size;
     }
 
-    fuse_reply_buf(req, buf.data(), offset);
+    yfs_dir_list_free(&list);
+    fuse_reply_buf(req, buf, offset);
+    free(buf);
+}
+
+static void yfs_ll_releasedir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
+    (void)ino;
+    (void)fi;
+    fuse_reply_err(req, 0);
+}
+
+static void yfs_ll_fsyncdir(fuse_req_t req, fuse_ino_t ino, int datasync, struct fuse_file_info *fi) {
+    (void)ino;
+    (void)datasync;
+    (void)fi;
+    fuse_reply_err(req, 0);
 }
 
 static void yfs_ll_statfs(fuse_req_t req, fuse_ino_t ino) {
     (void)ino;
     uint64_t total_blocks = 0, free_blocks = 0, total_inodes = 0, free_inodes = 0;
-    g_fs->statfs(total_blocks, free_blocks, total_inodes, free_inodes);
+    yfs_statfs(g_fs, &total_blocks, &free_blocks, &total_inodes, &free_inodes);
 
     struct statvfs stbuf;
     memset(&stbuf, 0, sizeof(stbuf));
@@ -235,47 +298,16 @@ static const struct fuse_lowlevel_ops yfs_oper = {
     .symlink = nullptr,
     .rename = nullptr,
     .link = nullptr,
-    .open = [](fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
-        (void)ino;
-        fuse_reply_open(req, fi);
-    },
+    .open = yfs_ll_open,
     .read = yfs_ll_read,
     .write = yfs_ll_write,
-    .flush = [](fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
-        (void)ino;
-        (void)fi;
-        fuse_reply_err(req, 0);
-    },
-    .release = [](fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
-        (void)ino;
-        (void)fi;
-        fuse_reply_err(req, 0);
-    },
-    .fsync = [](fuse_req_t req, fuse_ino_t ino, int datasync, struct fuse_file_info *fi) {
-        (void)ino;
-        (void)datasync;
-        (void)fi;
-        if (g_fs) {
-            g_fs->tx_mgr()->checkpoint();
-        }
-        fuse_reply_err(req, 0);
-    },
-    .opendir = [](fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
-        (void)ino;
-        fuse_reply_open(req, fi);
-    },
+    .flush = yfs_ll_flush,
+    .release = yfs_ll_release,
+    .fsync = yfs_ll_fsync,
+    .opendir = yfs_ll_opendir,
     .readdir = yfs_ll_readdir,
-    .releasedir = [](fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
-        (void)ino;
-        (void)fi;
-        fuse_reply_err(req, 0);
-    },
-    .fsyncdir = [](fuse_req_t req, fuse_ino_t ino, int datasync, struct fuse_file_info *fi) {
-        (void)ino;
-        (void)datasync;
-        (void)fi;
-        fuse_reply_err(req, 0);
-    },
+    .releasedir = yfs_ll_releasedir,
+    .fsyncdir = yfs_ll_fsyncdir,
     .statfs = yfs_ll_statfs,
     .setxattr = nullptr,
     .getxattr = nullptr,
@@ -300,25 +332,23 @@ static const struct fuse_lowlevel_ops yfs_oper = {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <image_or_device_path> <mount_point> [FUSE options...]" << std::endl;
+        fprintf(stderr, "Usage: %s <image_or_device_path> <mount_point> [FUSE options...]\n", argv[0]);
         return 1;
     }
 
-    std::string dev_path = argv[1];
-    std::string mountpoint = argv[2];
+    const char *dev_path = argv[1];
 
-    g_fs = new YFSFileSystem(dev_path);
-    if (!g_fs->mount()) {
-        std::cerr << "Failed to mount yFS filesystem from " << dev_path << std::endl;
-        delete g_fs;
+    g_fs = yfs_fs_create(dev_path);
+    if (!g_fs || !yfs_fs_mount(g_fs)) {
+        fprintf(stderr, "Failed to mount yFS filesystem from %s\n", dev_path);
+        if (g_fs) yfs_fs_destroy(g_fs);
         return 1;
     }
 
-    /* Shift arguments for FUSE */
     int fuse_argc = argc - 1;
-    char **fuse_argv = new char *[fuse_argc + 1];
+    char **fuse_argv = (char **)calloc(fuse_argc + 1, sizeof(char *));
     fuse_argv[0] = argv[0];
-    fuse_argv[1] = argv[2]; /* mountpoint */
+    fuse_argv[1] = argv[2];
     for (int i = 3; i < argc; ++i) {
         fuse_argv[i - 1] = argv[i];
     }
@@ -327,24 +357,29 @@ int main(int argc, char **argv) {
     struct fuse_args args = FUSE_ARGS_INIT(fuse_argc, fuse_argv);
     struct fuse_cmdline_opts opts;
     if (fuse_parse_cmdline(&args, &opts) != 0) {
+        free(fuse_argv);
         return 1;
     }
 
     struct fuse_session *se = fuse_session_new(&args, &yfs_oper, sizeof(yfs_oper), nullptr);
     if (!se) {
-        std::cerr << "Failed to create fuse session" << std::endl;
+        fprintf(stderr, "Failed to create fuse session\n");
+        free(fuse_argv);
         return 1;
     }
 
     if (fuse_set_signal_handlers(se) != 0) {
-        std::cerr << "Failed to set signal handlers" << std::endl;
+        fprintf(stderr, "Failed to set signal handlers\n");
+        fuse_session_destroy(se);
+        free(fuse_argv);
         return 1;
     }
 
     if (fuse_session_mount(se, opts.mountpoint) != 0) {
-        std::cerr << "Failed to mount fuse session at " << opts.mountpoint << std::endl;
+        fprintf(stderr, "Failed to mount fuse session at %s\n", opts.mountpoint);
         fuse_remove_signal_handlers(se);
         fuse_session_destroy(se);
+        free(fuse_argv);
         return 1;
     }
 
@@ -352,6 +387,7 @@ int main(int argc, char **argv) {
         fuse_session_unmount(se);
         fuse_remove_signal_handlers(se);
         fuse_session_destroy(se);
+        free(fuse_argv);
         return 1;
     }
 
@@ -362,10 +398,10 @@ int main(int argc, char **argv) {
     fuse_session_destroy(se);
     free(opts.mountpoint);
     fuse_opt_free_args(&args);
+    free(fuse_argv);
 
-    delete[] fuse_argv;
-    g_fs->unmount();
-    delete g_fs;
+    yfs_fs_destroy(g_fs);
+    g_fs = nullptr;
 
     return ret ? 1 : 0;
 }

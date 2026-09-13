@@ -75,7 +75,7 @@ An image formatted with `newfs_yfs` is partitioned into:
 ### Prerequisites on FreeBSD
 
 - FreeBSD 14+ / 15+
-- Clang 19 / C++17
+- Clang 19 (C23 Standard support)
 - CMake & GNU Make
 - `fusefs-libs3` (`pkg install fusefs-libs3`)
 - `fusefs.ko` kernel module loaded (`kldload fusefs`)

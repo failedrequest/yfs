@@ -3,47 +3,41 @@
 
 #include "yfs_fs.h"
 #include "block_dev.h"
-#include <vector>
-#include <mutex>
-#include <memory>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <pthread.h>
 
-class Journal {
-public:
-    Journal(BlockDev *dev, uint64_t start_blk, uint64_t total_blocks, uint32_t bsize = YFS_DEFAULT_BSIZE);
-    ~Journal();
+typedef struct journal {
+    block_dev_t *dev;
+    uint64_t start_blk;
+    uint64_t total_blocks;
+    uint32_t bsize;
+    yfs_journal_sb_t sb;
+    pthread_mutex_t lock;
+} journal_t;
 
-    bool init_journal();
-    bool load_journal();
+journal_t *journal_create(block_dev_t *dev, uint64_t start_blk, uint64_t total_blocks, uint32_t bsize);
+void journal_destroy(journal_t *j);
 
-    /* Write log record for transaction */
-    bool write_tx_begin(uint64_t txid);
-    bool write_block_redo(uint64_t txid, uint64_t target_blk, const void *data, uint32_t len);
-    bool write_tx_commit(uint64_t txid);
+bool journal_init(journal_t *j);
+bool journal_load(journal_t *j);
 
-    /* Flush journal writes to disk */
-    bool flush();
+/* Write log record for transaction */
+bool journal_write_tx_begin(journal_t *j, uint64_t txid);
+bool journal_write_block_redo(journal_t *j, uint64_t txid, uint64_t target_blk, const void *data, uint32_t len);
+bool journal_write_tx_commit(journal_t *j, uint64_t txid);
 
-    /* Checkpoint: advance tail to reclaimed tx */
-    bool update_tail(uint64_t last_checkpointed_tx);
+/* Flush journal writes to disk */
+bool journal_flush(journal_t *j);
 
-    /* Crash recovery: read and replay uncheckpointed committed transactions */
-    bool recover(BlockDev *dev);
+/* Checkpoint: advance tail to reclaimed tx */
+bool journal_update_tail(journal_t *j, uint64_t last_checkpointed_tx);
 
-    uint64_t next_txid();
-    uint64_t last_txid() const { return sb_.j_last_txid; }
+/* Crash recovery: read and replay uncheckpointed committed transactions */
+bool journal_recover(journal_t *j, block_dev_t *dev);
 
-private:
-    BlockDev *dev_;
-    uint64_t start_blk_;
-    uint64_t total_blocks_;
-    uint32_t bsize_;
-    yfs_journal_sb sb_;
-    std::mutex journal_lock_;
-
-    bool write_journal_block(uint64_t log_offset, const void *buf);
-    bool read_journal_block(uint64_t log_offset, void *buf);
-    bool sync_sb();
-    uint32_t compute_checksum(const void *buf, size_t len);
-};
+uint64_t journal_next_txid(journal_t *j);
+uint64_t journal_last_txid(journal_t *j);
 
 #endif /* JOURNAL_H */
