@@ -2,6 +2,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/disk.h>
+#include <sys/ioctl.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -45,6 +47,21 @@ block_dev_t *block_dev_open(const char *path, bool create_if_missing, uint64_t s
             dev->size_bytes = size_bytes;
         } else {
             dev->size_bytes = (uint64_t)st.st_size;
+        }
+    } else if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) {
+        off_t medsize = 0;
+#ifdef DIOCGMEDIASIZE
+        if (ioctl(dev->fd, DIOCGMEDIASIZE, &medsize) == 0 && medsize > 0) {
+            dev->size_bytes = (uint64_t)medsize;
+        } else
+#endif
+        {
+            off_t end = lseek(dev->fd, 0, SEEK_END);
+            if (end > 0) {
+                dev->size_bytes = (uint64_t)end;
+            } else if (size_bytes > 0) {
+                dev->size_bytes = size_bytes;
+            }
         }
     } else {
         dev->size_bytes = (uint64_t)st.st_size;

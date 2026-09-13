@@ -132,7 +132,7 @@ void yfs_fs_destroy(yfs_filesystem_t *fs) {
     free(fs);
 }
 
-bool yfs_fs_mount(yfs_filesystem_t *fs) {
+bool yfs_fs_mount(yfs_filesystem_t *fs, size_t cache_max_blocks) {
     if (!fs) return false;
     pthread_mutex_lock(&fs->lock);
 
@@ -142,7 +142,8 @@ bool yfs_fs_mount(yfs_filesystem_t *fs) {
         return false;
     }
 
-    fs->cache = buffer_cache_create(fs->dev, YFS_DEFAULT_BSIZE, 2048);
+    size_t c_blocks = cache_max_blocks > 0 ? cache_max_blocks : 65536;
+    fs->cache = buffer_cache_create(fs->dev, YFS_DEFAULT_BSIZE, c_blocks);
 
     if (!load_superblock(fs)) {
         pthread_mutex_unlock(&fs->lock);
@@ -489,8 +490,9 @@ int yfs_lookup(yfs_filesystem_t *fs, uint32_t parent_ino, const char *name, uint
         for (size_t i = 0; i < dirents_per_block && offset < pinode.di_size; ++i) {
             if (darr[i].d_ino != 0) {
                 if (strcmp(name, darr[i].d_name) == 0) {
-                    if (out_ino) *out_ino = darr[i].d_ino;
-                    if (out_dinode) yfs_read_inode(fs, darr[i].d_ino, out_dinode);
+                    uint32_t found_ino = darr[i].d_ino;
+                    if (out_ino) *out_ino = found_ino;
+                    if (out_dinode) yfs_read_inode(fs, found_ino, out_dinode);
                     pthread_mutex_unlock(&fs->lock);
                     return 0;
                 }
@@ -568,22 +570,144 @@ int yfs_create(yfs_filesystem_t *fs, uint32_t parent_ino, const char *name, mode
     new_dinode.di_gid = gid;
     yfs_write_inode(fs, tx, new_ino, &new_dinode);
 
-    uint32_t lblk = (uint32_t)(pinode.di_size / fs->sb.s_bsize);
-    size_t offset_in_blk = pinode.di_size % fs->sb.s_bsize;
-    size_t entry_idx = offset_in_blk / sizeof(yfs_dirent_t);
+    /* Look for an empty directory slot before appending */
+    size_t dirents_per_block = fs->sb.s_bsize / sizeof(yfs_dirent_t);
+    uint64_t cur_off = 0;
+    bool slot_found = false;
 
-    uint32_t pblk = yfs_bmap(fs, tx, &pinode, parent_ino, lblk, true);
+    for (uint32_t lblk = 0; cur_off < pinode.di_size; ++lblk) {
+        uint32_t pblk = yfs_bmap(fs, tx, &pinode, parent_ino, lblk, false);
+        if (pblk == 0) break;
+
+        block_buffer_t *buf = buffer_cache_get(fs->cache, pblk, false);
+        if (!buf) break;
+
+        yfs_dirent_t *darr = (yfs_dirent_t *)buf->data;
+        for (size_t i = 0; i < dirents_per_block && cur_off < pinode.di_size; ++i) {
+            if (darr[i].d_ino == 0) {
+                darr[i].d_ino = new_ino;
+                darr[i].d_type = 1; /* DT_REG */
+                size_t name_len = strlen(name);
+                darr[i].d_namlen = (uint8_t)(name_len < YFS_MAX_NAME_LEN ? name_len : YFS_MAX_NAME_LEN);
+                strncpy(darr[i].d_name, name, YFS_MAX_NAME_LEN);
+                darr[i].d_name[YFS_MAX_NAME_LEN] = '\0';
+                darr[i].d_reclen = sizeof(yfs_dirent_t);
+
+                tx_modify_block(tx, buf);
+                pinode.di_mtime = (uint64_t)time(nullptr);
+                yfs_write_inode(fs, tx, parent_ino, &pinode);
+                slot_found = true;
+                break;
+            }
+            cur_off += sizeof(yfs_dirent_t);
+        }
+        if (slot_found) break;
+    }
+
+    if (!slot_found) {
+        uint32_t lblk = (uint32_t)(pinode.di_size / fs->sb.s_bsize);
+        size_t offset_in_blk = pinode.di_size % fs->sb.s_bsize;
+        size_t entry_idx = offset_in_blk / sizeof(yfs_dirent_t);
+
+        uint32_t pblk = yfs_bmap(fs, tx, &pinode, parent_ino, lblk, true);
+        if (pblk == 0) {
+            tx_abort(tx);
+            pthread_mutex_unlock(&fs->lock);
+            return -ENOSPC;
+        }
+
+        block_buffer_t *buf = buffer_cache_get(fs->cache, pblk, false);
+        yfs_dirent_t *darr = (yfs_dirent_t *)buf->data;
+
+        darr[entry_idx].d_ino = new_ino;
+        darr[entry_idx].d_type = 1; /* DT_REG */
+        size_t name_len = strlen(name);
+        darr[entry_idx].d_namlen = (uint8_t)(name_len < YFS_MAX_NAME_LEN ? name_len : YFS_MAX_NAME_LEN);
+        strncpy(darr[entry_idx].d_name, name, YFS_MAX_NAME_LEN);
+        darr[entry_idx].d_name[YFS_MAX_NAME_LEN] = '\0';
+        darr[entry_idx].d_reclen = sizeof(yfs_dirent_t);
+
+        tx_modify_block(tx, buf);
+
+        pinode.di_size += sizeof(yfs_dirent_t);
+        pinode.di_mtime = (uint64_t)time(nullptr);
+        yfs_write_inode(fs, tx, parent_ino, &pinode);
+    }
+
+    tx_commit(tx);
+
+    if (out_ino) *out_ino = new_ino;
+    if (out_dinode) *out_dinode = new_dinode;
+
+    pthread_mutex_unlock(&fs->lock);
+    return 0;
+}
+
+int yfs_mknod(yfs_filesystem_t *fs, uint32_t parent_ino, const char *name, mode_t mode, dev_t rdev, uint32_t uid, uint32_t gid, uint32_t *out_ino, yfs_dinode_t *out_dinode) {
+    (void)rdev;
+    return yfs_create(fs, parent_ino, name, mode, uid, gid, out_ino, out_dinode);
+}
+
+int yfs_symlink(yfs_filesystem_t *fs, const char *target, uint32_t parent_ino, const char *name, uint32_t uid, uint32_t gid, uint32_t *out_ino, yfs_dinode_t *out_dinode) {
+    if (!fs || !target || !name) return -EINVAL;
+    pthread_mutex_lock(&fs->lock);
+
+    yfs_dinode_t pinode;
+    if (!yfs_read_inode(fs, parent_ino, &pinode)) {
+        pthread_mutex_unlock(&fs->lock);
+        return -ENOENT;
+    }
+    if ((pinode.di_mode & YFS_IFDIR) == 0) {
+        pthread_mutex_unlock(&fs->lock);
+        return -ENOTDIR;
+    }
+
+    transaction_t *tx = tx_begin(fs->tx_mgr);
+    uint32_t new_ino = yfs_alloc_inode(fs, tx, 0777 | YFS_IFLNK);
+    if (new_ino == 0) {
+        tx_abort(tx);
+        pthread_mutex_unlock(&fs->lock);
+        return -ENOSPC;
+    }
+
+    yfs_dinode_t new_dinode;
+    yfs_read_inode(fs, new_ino, &new_dinode);
+    new_dinode.di_uid = uid;
+    new_dinode.di_gid = gid;
+
+    size_t target_len = strlen(target);
+    uint32_t pblk = yfs_bmap(fs, tx, &new_dinode, new_ino, 0, true);
     if (pblk == 0) {
         tx_abort(tx);
         pthread_mutex_unlock(&fs->lock);
         return -ENOSPC;
     }
 
-    block_buffer_t *buf = buffer_cache_get(fs->cache, pblk, false);
+    block_buffer_t *target_buf = buffer_cache_get(fs->cache, pblk, false);
+    memcpy(target_buf->data, target, target_len);
+    buffer_cache_mark_dirty(fs->cache, target_buf, tx->txid);
+
+    new_dinode.di_size = target_len;
+    new_dinode.di_mtime = (uint64_t)time(nullptr);
+    yfs_write_inode(fs, tx, new_ino, &new_dinode);
+
+    /* Append to parent dir */
+    uint32_t lblk = (uint32_t)(pinode.di_size / fs->sb.s_bsize);
+    size_t offset_in_blk = pinode.di_size % fs->sb.s_bsize;
+    size_t entry_idx = offset_in_blk / sizeof(yfs_dirent_t);
+
+    uint32_t dir_pblk = yfs_bmap(fs, tx, &pinode, parent_ino, lblk, true);
+    if (dir_pblk == 0) {
+        tx_abort(tx);
+        pthread_mutex_unlock(&fs->lock);
+        return -ENOSPC;
+    }
+
+    block_buffer_t *buf = buffer_cache_get(fs->cache, dir_pblk, false);
     yfs_dirent_t *darr = (yfs_dirent_t *)buf->data;
 
     darr[entry_idx].d_ino = new_ino;
-    darr[entry_idx].d_type = 1; /* DT_REG */
+    darr[entry_idx].d_type = 3; /* DT_LNK */
     size_t name_len = strlen(name);
     darr[entry_idx].d_namlen = (uint8_t)(name_len < YFS_MAX_NAME_LEN ? name_len : YFS_MAX_NAME_LEN);
     strncpy(darr[entry_idx].d_name, name, YFS_MAX_NAME_LEN);
@@ -601,6 +725,133 @@ int yfs_create(yfs_filesystem_t *fs, uint32_t parent_ino, const char *name, mode
     if (out_ino) *out_ino = new_ino;
     if (out_dinode) *out_dinode = new_dinode;
 
+    pthread_mutex_unlock(&fs->lock);
+    return 0;
+}
+
+int yfs_readlink(yfs_filesystem_t *fs, uint32_t ino, char *buf, size_t size) {
+    if (!fs || !buf || size == 0) return -EINVAL;
+    pthread_mutex_lock(&fs->lock);
+
+    yfs_dinode_t dinode;
+    if (!yfs_read_inode(fs, ino, &dinode)) {
+        pthread_mutex_unlock(&fs->lock);
+        return -ENOENT;
+    }
+    if ((dinode.di_mode & YFS_IFLNK) == 0) {
+        pthread_mutex_unlock(&fs->lock);
+        return -EINVAL;
+    }
+
+    uint32_t pblk = yfs_bmap(fs, nullptr, &dinode, ino, 0, false);
+    if (pblk == 0) {
+        pthread_mutex_unlock(&fs->lock);
+        return -EIO;
+    }
+
+    block_buffer_t *b = buffer_cache_get(fs->cache, pblk, false);
+    if (!b) {
+        pthread_mutex_unlock(&fs->lock);
+        return -EIO;
+    }
+
+    size_t to_copy = dinode.di_size < (size - 1) ? dinode.di_size : (size - 1);
+    memcpy(buf, b->data, to_copy);
+    buf[to_copy] = '\0';
+
+    pthread_mutex_unlock(&fs->lock);
+    return 0;
+}
+
+int yfs_rename(yfs_filesystem_t *fs, uint32_t old_parent, const char *old_name, uint32_t new_parent, const char *new_name) {
+    if (!fs || !old_name || !new_name) return -EINVAL;
+
+    uint32_t target_ino = 0;
+    yfs_dinode_t target_dinode;
+    int ret = yfs_lookup(fs, old_parent, old_name, &target_ino, &target_dinode);
+    if (ret != 0) return ret;
+
+    /* If new target exists, unlink it first */
+    uint32_t existing_ino = 0;
+    yfs_dinode_t existing_dinode;
+    if (yfs_lookup(fs, new_parent, new_name, &existing_ino, &existing_dinode) == 0) {
+        if (existing_dinode.di_mode & YFS_IFDIR) {
+            yfs_rmdir(fs, new_parent, new_name);
+        } else {
+            yfs_unlink(fs, new_parent, new_name);
+        }
+    }
+
+    pthread_mutex_lock(&fs->lock);
+
+    yfs_dinode_t old_pinode;
+    if (!yfs_read_inode(fs, old_parent, &old_pinode)) {
+        pthread_mutex_unlock(&fs->lock);
+        return -ENOENT;
+    }
+
+    yfs_dinode_t new_pinode;
+    if (!yfs_read_inode(fs, new_parent, &new_pinode)) {
+        pthread_mutex_unlock(&fs->lock);
+        return -ENOENT;
+    }
+
+    transaction_t *tx = tx_begin(fs->tx_mgr);
+
+    /* 1. Add entry to new_parent */
+    uint32_t lblk = (uint32_t)(new_pinode.di_size / fs->sb.s_bsize);
+    size_t offset_in_blk = new_pinode.di_size % fs->sb.s_bsize;
+    size_t entry_idx = offset_in_blk / sizeof(yfs_dirent_t);
+
+    uint32_t pblk = yfs_bmap(fs, tx, &new_pinode, new_parent, lblk, true);
+    if (pblk == 0) {
+        tx_abort(tx);
+        pthread_mutex_unlock(&fs->lock);
+        return -ENOSPC;
+    }
+
+    block_buffer_t *buf = buffer_cache_get(fs->cache, pblk, false);
+    yfs_dirent_t *darr = (yfs_dirent_t *)buf->data;
+
+    darr[entry_idx].d_ino = target_ino;
+    darr[entry_idx].d_type = (target_dinode.di_mode & YFS_IFDIR) ? 2 : ((target_dinode.di_mode & YFS_IFLNK) ? 3 : 1);
+    size_t name_len = strlen(new_name);
+    darr[entry_idx].d_namlen = (uint8_t)(name_len < YFS_MAX_NAME_LEN ? name_len : YFS_MAX_NAME_LEN);
+    strncpy(darr[entry_idx].d_name, new_name, YFS_MAX_NAME_LEN);
+    darr[entry_idx].d_name[YFS_MAX_NAME_LEN] = '\0';
+    darr[entry_idx].d_reclen = sizeof(yfs_dirent_t);
+
+    tx_modify_block(tx, buf);
+
+    new_pinode.di_size += sizeof(yfs_dirent_t);
+    new_pinode.di_mtime = (uint64_t)time(nullptr);
+    yfs_write_inode(fs, tx, new_parent, &new_pinode);
+
+    /* 2. Remove entry from old_parent */
+    size_t dirents_per_block = fs->sb.s_bsize / sizeof(yfs_dirent_t);
+    uint64_t offset = 0;
+
+    for (uint32_t l = 0; offset < old_pinode.di_size; ++l) {
+        uint32_t p = yfs_bmap(fs, tx, &old_pinode, old_parent, l, false);
+        if (p == 0) break;
+
+        block_buffer_t *old_buf = buffer_cache_get(fs->cache, p, false);
+        if (!old_buf) break;
+
+        yfs_dirent_t *old_darr = (yfs_dirent_t *)old_buf->data;
+        for (size_t i = 0; i < dirents_per_block && offset < old_pinode.di_size; ++i) {
+            if (old_darr[i].d_ino == target_ino && strcmp(old_name, old_darr[i].d_name) == 0) {
+                old_darr[i].d_ino = 0;
+                tx_modify_block(tx, old_buf);
+                old_pinode.di_mtime = (uint64_t)time(nullptr);
+                yfs_write_inode(fs, tx, old_parent, &old_pinode);
+                break;
+            }
+            offset += sizeof(yfs_dirent_t);
+        }
+    }
+
+    tx_commit(tx);
     pthread_mutex_unlock(&fs->lock);
     return 0;
 }

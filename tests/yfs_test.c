@@ -12,14 +12,18 @@ void test_basic_fs_ops(void) {
 
     /* Format */
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "./newfs_yfs -s 16 %s", test_img);
+    snprintf(cmd, sizeof(cmd), "./build/newfs_yfs -s 16 %s", test_img);
     int res = system(cmd);
+    if (res != 0) {
+        snprintf(cmd, sizeof(cmd), "./newfs_yfs -s 16 %s", test_img);
+        res = system(cmd);
+    }
     assert(res == 0);
 
     /* Mount filesystem */
     yfs_filesystem_t *fs = yfs_fs_create(test_img);
     assert(fs != nullptr);
-    assert(yfs_fs_mount(fs));
+    assert(yfs_fs_mount(fs, 2048));
 
     /* Create file /hello.txt */
     uint32_t ino = 0;
@@ -82,14 +86,19 @@ void test_journal_recovery(void) {
     unlink(test_img);
 
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "./newfs_yfs -s 16 %s", test_img);
-    assert(system(cmd) == 0);
+    snprintf(cmd, sizeof(cmd), "./build/newfs_yfs -s 16 %s", test_img);
+    int res = system(cmd);
+    if (res != 0) {
+        snprintf(cmd, sizeof(cmd), "./newfs_yfs -s 16 %s", test_img);
+        res = system(cmd);
+    }
+    assert(res == 0);
 
     /* Simulate dirty write with committed transaction without clean unmount */
     {
         yfs_filesystem_t *fs = yfs_fs_create(test_img);
         assert(fs != nullptr);
-        assert(yfs_fs_mount(fs));
+        assert(yfs_fs_mount(fs, 2048));
 
         uint32_t file_ino = 0;
         yfs_dinode_t dinode;
@@ -111,7 +120,7 @@ void test_journal_recovery(void) {
     {
         yfs_filesystem_t *fs = yfs_fs_create(test_img);
         assert(fs != nullptr);
-        assert(yfs_fs_mount(fs));
+        assert(yfs_fs_mount(fs, 2048));
 
         uint32_t found_ino = 0;
         yfs_dinode_t found_dinode;

@@ -38,7 +38,7 @@ typedef struct yfs_filesystem {
 yfs_filesystem_t *yfs_fs_create(const char *dev_path);
 void yfs_fs_destroy(yfs_filesystem_t *fs);
 
-bool yfs_fs_mount(yfs_filesystem_t *fs);
+bool yfs_fs_mount(yfs_filesystem_t *fs, size_t cache_max_blocks);
 void yfs_fs_unmount(yfs_filesystem_t *fs);
 
 /* Filesystem operations */
@@ -46,7 +46,11 @@ int yfs_lookup(yfs_filesystem_t *fs, uint32_t parent_ino, const char *name, uint
 int yfs_getattr(yfs_filesystem_t *fs, uint32_t ino, yfs_dinode_t *out_dinode);
 int yfs_setattr(yfs_filesystem_t *fs, uint32_t ino, const yfs_dinode_t *dinode, int to_set);
 int yfs_create(yfs_filesystem_t *fs, uint32_t parent_ino, const char *name, mode_t mode, uint32_t uid, uint32_t gid, uint32_t *out_ino, yfs_dinode_t *out_dinode);
+int yfs_mknod(yfs_filesystem_t *fs, uint32_t parent_ino, const char *name, mode_t mode, dev_t rdev, uint32_t uid, uint32_t gid, uint32_t *out_ino, yfs_dinode_t *out_dinode);
 int yfs_mkdir(yfs_filesystem_t *fs, uint32_t parent_ino, const char *name, mode_t mode, uint32_t uid, uint32_t gid, uint32_t *out_ino, yfs_dinode_t *out_dinode);
+int yfs_symlink(yfs_filesystem_t *fs, const char *target, uint32_t parent_ino, const char *name, uint32_t uid, uint32_t gid, uint32_t *out_ino, yfs_dinode_t *out_dinode);
+int yfs_readlink(yfs_filesystem_t *fs, uint32_t ino, char *buf, size_t size);
+int yfs_rename(yfs_filesystem_t *fs, uint32_t old_parent, const char *old_name, uint32_t new_parent, const char *new_name);
 int yfs_unlink(yfs_filesystem_t *fs, uint32_t parent_ino, const char *name);
 int yfs_rmdir(yfs_filesystem_t *fs, uint32_t parent_ino, const char *name);
 int yfs_readdir(yfs_filesystem_t *fs, uint32_t ino, yfs_dir_list_t *list);

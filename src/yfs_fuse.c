@@ -43,6 +43,12 @@ static void yfs_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
     fuse_reply_entry(req, &e);
 }
 
+static void yfs_ll_forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup) {
+    (void)ino;
+    (void)nlookup;
+    fuse_reply_none(req);
+}
+
 static void yfs_ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
     (void)fi;
     yfs_dinode_t dinode;
@@ -283,21 +289,80 @@ static void yfs_ll_statfs(fuse_req_t req, fuse_ino_t ino) {
     fuse_reply_statfs(req, &stbuf);
 }
 
+static void yfs_ll_readlink(fuse_req_t req, fuse_ino_t ino) {
+    char buf[1024] = {0};
+    int ret = yfs_readlink(g_fs, (uint32_t)ino, buf, sizeof(buf));
+    if (ret != 0) {
+        fuse_reply_err(req, -ret);
+        return;
+    }
+    fuse_reply_readlink(req, buf);
+}
+
+static void yfs_ll_mknod(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev) {
+    const struct fuse_ctx *ctx = fuse_req_ctx(req);
+    uint32_t out_ino = 0;
+    yfs_dinode_t dinode;
+    int ret = yfs_mknod(g_fs, (uint32_t)parent, name, mode, rdev, ctx->uid, ctx->gid, &out_ino, &dinode);
+    if (ret != 0) {
+        fuse_reply_err(req, -ret);
+        return;
+    }
+    struct fuse_entry_param e;
+    memset(&e, 0, sizeof(e));
+    e.ino = out_ino;
+    e.attr_timeout = 1.0;
+    e.entry_timeout = 1.0;
+    dinode_to_stat(out_ino, &dinode, &e.attr);
+    fuse_reply_entry(req, &e);
+}
+
+static void yfs_ll_symlink(fuse_req_t req, const char *link, fuse_ino_t parent, const char *name) {
+    const struct fuse_ctx *ctx = fuse_req_ctx(req);
+    uint32_t out_ino = 0;
+    yfs_dinode_t dinode;
+    int ret = yfs_symlink(g_fs, link, (uint32_t)parent, name, ctx->uid, ctx->gid, &out_ino, &dinode);
+    if (ret != 0) {
+        fuse_reply_err(req, -ret);
+        return;
+    }
+    struct fuse_entry_param e;
+    memset(&e, 0, sizeof(e));
+    e.ino = out_ino;
+    e.attr_timeout = 1.0;
+    e.entry_timeout = 1.0;
+    dinode_to_stat(out_ino, &dinode, &e.attr);
+    fuse_reply_entry(req, &e);
+}
+
+static void yfs_ll_rename(fuse_req_t req, fuse_ino_t parent, const char *name, fuse_ino_t newparent, const char *newname, unsigned int flags) {
+    (void)flags;
+    int ret = yfs_rename(g_fs, (uint32_t)parent, name, (uint32_t)newparent, newname);
+    fuse_reply_err(req, ret == 0 ? 0 : -ret);
+}
+
+static void yfs_ll_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent, const char *newname) {
+    (void)ino;
+    (void)newparent;
+    (void)newname;
+    fuse_reply_err(req, ENOSYS);
+}
+
 static const struct fuse_lowlevel_ops yfs_oper = {
     .init = nullptr,
     .destroy = nullptr,
     .lookup = yfs_ll_lookup,
-    .forget = nullptr,
+    .forget = yfs_ll_forget,
     .getattr = yfs_ll_getattr,
     .setattr = yfs_ll_setattr,
-    .readlink = nullptr,
-    .mknod = nullptr,
+    .readlink = yfs_ll_readlink,
+    .mknod = yfs_ll_mknod,
     .mkdir = yfs_ll_mkdir,
     .unlink = yfs_ll_unlink,
     .rmdir = yfs_ll_rmdir,
-    .symlink = nullptr,
-    .rename = nullptr,
-    .link = nullptr,
+    .symlink = yfs_ll_symlink,
+    .rename = yfs_ll_rename,
+    .link = yfs_ll_link,
     .open = yfs_ll_open,
     .read = yfs_ll_read,
     .write = yfs_ll_write,
@@ -339,7 +404,7 @@ int main(int argc, char **argv) {
     const char *dev_path = argv[1];
 
     g_fs = yfs_fs_create(dev_path);
-    if (!g_fs || !yfs_fs_mount(g_fs)) {
+    if (!g_fs || !yfs_fs_mount(g_fs, 65536)) {
         fprintf(stderr, "Failed to mount yFS filesystem from %s\n", dev_path);
         if (g_fs) yfs_fs_destroy(g_fs);
         return 1;
